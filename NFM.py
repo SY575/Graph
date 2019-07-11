@@ -18,6 +18,8 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 import warnings
 warnings.filterwarnings('ignore')
+from random import shuffle
+from sklearn.model_selection import KFold
 
 
 class NFM():
@@ -35,9 +37,16 @@ class NFM():
                  verbose=False,
                  batch_size=512,
                  random_state=3,
-                 use_model='fm'):
+                 use_model='fm',
+                 n_class=2,
+                 get_prob=False,
+                 df_test=None):
         assert use_model in ['fm', 'ffm'] , "use_model must in ['fm', 'ffm']"
-        self.df = df.copy()
+        assert get_prob==False or (get_prob==True and df_test is not None)
+        self.df = df[onehot_feature+
+                     numerical_feature+
+                     vector_feature+
+                     [label_name]].copy()
         self.label_name = label_name
         self.onehot_feature = onehot_feature
         self.numerical_feature = numerical_feature
@@ -48,11 +57,18 @@ class NFM():
         self.batch_size = batch_size
         self.random_state = random_state
         self.use_model = use_model
+        self.n_class = n_class
+        self.get_prob = get_prob
+        if self.get_prob:
+            self.df_test = df_test[onehot_feature+
+                                   numerical_feature+
+                                   vector_feature+
+                                   [label_name]].copy()
         
         self.dynamic_max_len = 10
         
         self.len_train = self.df.shape[0]
-        self.n_class = self.df[self.label_name].nunique()
+        # self.n_class = self.df[self.label_name].nunique()
         
         self.__run__()
     
@@ -62,157 +78,268 @@ class NFM():
         if self.verbose:
             print('======== training ========')
         
-        if self.use_model == 'fm':
-            model = Model_FM(
-                    field_sizes=self.field_sizes, 
-                    total_feature_sizes=self.total_feature_sizes,
-                    embedding_size=self.embedding_size,
-                    onehot_feature = self.onehot_feature + self.numerical_feature,
-                    vector_feature = self.vector_feature,
-                    n_class = self.n_class,
-                          )
-        elif self.use_model == 'ffm':
-            model = Model_FFM(
-                    field_sizes=self.field_sizes, 
-                    total_feature_sizes=self.total_feature_sizes,
-                    embedding_size=self.embedding_size,
-                    onehot_feature = self.onehot_feature + self.numerical_feature,
-                    vector_feature = self.vector_feature,
-                    n_class = self.n_class,
-                          )
-        for epoch in range(self.epoch):
-            t1 = time()
-            label_lst, out_lst = None, None
-            label_e, out_e = None, None
-            for ix, batch_ix in enumerate(range(0, self.len_train, self.batch_size)):
-                batch_static, batch_dynamic, batch_dynamic_len, batch_y = self.get_batch(batch_ix)
-                batch_static = np.array(batch_static)
-                batch_dynamic = np.array(batch_dynamic.tolist())
-                batch_dynamic_len = np.array(batch_dynamic_len)
-                batch_y = np.array(batch_y.tolist())
-                
-                f_dict = {model.label:batch_y,
-                          model.static_index: batch_static, 
-                          model.dropout_keep_fm:[1.0, 1.0],
-                          model.dropout_keep_deep:[1.0, 1.0, 1.0],
-                          model.train_phase: True}
-                if len(self.vector_feature) != 0:
-                    f_dict.update({model.dynamic_index:batch_dynamic,
-                                   model.dynamic_len:batch_dynamic_len})
-                loss_, _ ,label_, out_= model.sess.run(
-                        (model.loss, model.optimizer, model.label, model.out),
-                        feed_dict=f_dict)
-                # 
-                out_ = res_normalization(out_)
-                if label_e is None:
-                    label_e = label_
-                    out_e = out_
-                else:
-                    label_e = np.concatenate((label_e, label_), axis=0)
-                    out_e = np.concatenate((out_e, out_), axis=0)
-                if label_lst is None:
-                    label_lst = label_
-                    out_lst = out_
-                else:
-                    label_lst = np.concatenate((label_lst, label_), axis=0)
-                    out_lst = np.concatenate((out_lst, out_), axis=0)
-                if self.verbose and ix % 100 == 99:
-                    print('[%d/%d] logloss = %.4f [ %ds ]'
-                          %(ix+1, self.len_train//self.batch_size, 
-                            log_loss(label_e, out_e), 
-                            int(time()-t1)))
+        if self.get_prob:
+            oof = np.zeros((len(self.train_ix), self.n_class))
+            prediction = np.zeros((len(self.test_ix), self.n_class))
+            kf = KFold(n_splits=5, random_state=575)
+            for fold, (train_ix, val_ix) in enumerate(kf.split(self.y[:len(self.train_ix)]), 1):
+                print(f'fold {fold}')
+                if self.use_model == 'fm':
+                    model = Model_FM(
+                            field_sizes=self.field_sizes, 
+                            total_feature_sizes=self.total_feature_sizes,
+                            embedding_size=self.embedding_size,
+                            onehot_feature = self.onehot_feature + self.numerical_feature,
+                            vector_feature = self.vector_feature,
+                            n_class = self.n_class,
+                                  )
+                elif self.use_model == 'ffm':
+                    model = Model_FFM(
+                            field_sizes=self.field_sizes, 
+                            total_feature_sizes=self.total_feature_sizes,
+                            embedding_size=self.embedding_size,
+                            onehot_feature = self.onehot_feature + self.numerical_feature,
+                            vector_feature = self.vector_feature,
+                            n_class = self.n_class,
+                                  )
+                shuffle(train_ix)
+                for epoch in range(self.epoch):
+                    t1 = time()
+                    label_lst, out_lst = None, None
                     label_e, out_e = None, None
-        
-        self.embedding = model.get_embeddings(self.dic_LabelEncoder)
+                    for ix, batch_ix in enumerate(range(0, len(train_ix), self.batch_size)):
+                        _lst = train_ix[ix*self.batch_size:min(len(train_ix), (ix+1)*self.batch_size)]
+                        batch_static, batch_dynamic, batch_dynamic_len, batch_y = self.get_batch(_lst)
+                        batch_static = np.array(batch_static)
+                        batch_dynamic = np.array(batch_dynamic.tolist())
+                        batch_dynamic_len = np.array(batch_dynamic_len)
+                        batch_y = np.array(batch_y.tolist())
+                        f_dict = {model.label:batch_y,
+                                  model.static_index: batch_static, 
+                                  model.dropout_keep_fm:[1.0, 1.0],
+                                  model.dropout_keep_deep:[1.0, 1.0, 1.0],
+                                  model.train_phase: True}
+                        if len(self.vector_feature) != 0:
+                            f_dict.update({model.dynamic_index:batch_dynamic,
+                                           model.dynamic_len:batch_dynamic_len})
+                        loss_, _ ,label_, out_= model.sess.run(
+                                (model.loss, model.optimizer, model.label, model.out),
+                                feed_dict=f_dict)
+                        out_ = res_normalization(out_)
+                        if label_e is None:
+                            label_e = label_
+                            out_e = out_
+                        else:
+                            label_e = np.concatenate((label_e, label_), axis=0)
+                            out_e = np.concatenate((out_e, out_), axis=0)
+                        if label_lst is None:
+                            label_lst = label_
+                            out_lst = out_
+                        else:
+                            label_lst = np.concatenate((label_lst, label_), axis=0)
+                            out_lst = np.concatenate((out_lst, out_), axis=0)
+                        if self.verbose and ix % 100 == 99:
+                            print('[%d/%d] logloss = %.4f [ %ds ]'
+                                  %(ix+1, len(self.train_ix)//self.batch_size, 
+                                    log_loss(label_e, out_e), 
+                                    int(time()-t1)))
+                            label_e, out_e = None, None
+                self.embedding = model.get_embeddings(self.dic_LabelEncoder)
+                for ix, batch_ix in enumerate(range(0, len(val_ix), self.batch_size)):
+                    _lst = val_ix[ix*self.batch_size:min(len(self.y), (ix+1)*self.batch_size)]
+                    batch_static, batch_dynamic, batch_dynamic_len, batch_y = self.get_batch(_lst)
+                    batch_static = np.array(batch_static)
+                    batch_dynamic = np.array(batch_dynamic.tolist())
+                    batch_dynamic_len = np.array(batch_dynamic_len)
+                    batch_y = np.array(batch_y.tolist())
+                    
+                    f_dict = {model.static_index: batch_static, 
+                              model.dropout_keep_fm:[1.0, 1.0],
+                              model.dropout_keep_deep:[1.0, 1.0, 1.0],
+                              model.train_phase: True}
+                    if len(self.vector_feature) != 0:
+                        f_dict.update({model.dynamic_index:batch_dynamic,
+                                       model.dynamic_len:batch_dynamic_len})
+                    out_= model.sess.run(
+                            (model.out),
+                            feed_dict=f_dict)
+                    out_ = res_normalization(out_)
+                    oof[_lst] = out_
+                for ix, batch_ix in enumerate(range(0, len(self.test_ix), self.batch_size)):
+                    _lst = self.test_ix[ix*self.batch_size:min(len(self.y), (ix+1)*self.batch_size)]
+                    batch_static, batch_dynamic, batch_dynamic_len, batch_y = self.get_batch(_lst)
+                    batch_static = np.array(batch_static)
+                    batch_dynamic = np.array(batch_dynamic.tolist())
+                    batch_dynamic_len = np.array(batch_dynamic_len)
+                    batch_y = np.array(batch_y.tolist())
+                    
+                    f_dict = {model.static_index: batch_static, 
+                              model.dropout_keep_fm:[1.0, 1.0],
+                              model.dropout_keep_deep:[1.0, 1.0, 1.0],
+                              model.train_phase: True}
+                    if len(self.vector_feature) != 0:
+                        f_dict.update({model.dynamic_index:batch_dynamic,
+                                       model.dynamic_len:batch_dynamic_len})
+                    out_= model.sess.run(
+                            (model.out),
+                            feed_dict=f_dict)
+                    out_ = res_normalization(out_)
+                    prediction[np.array(_lst)-len(self.train_ix)] += out_ / 5
+            self.oof = oof
+            self.prediction = prediction
+        else:
+            if self.use_model == 'fm':
+                model = Model_FM(
+                        field_sizes=self.field_sizes, 
+                        total_feature_sizes=self.total_feature_sizes,
+                        embedding_size=self.embedding_size,
+                        onehot_feature = self.onehot_feature + self.numerical_feature,
+                        vector_feature = self.vector_feature,
+                        n_class = self.n_class,
+                              )
+            elif self.use_model == 'ffm':
+                model = Model_FFM(
+                        field_sizes=self.field_sizes, 
+                        total_feature_sizes=self.total_feature_sizes,
+                        embedding_size=self.embedding_size,
+                        onehot_feature = self.onehot_feature + self.numerical_feature,
+                        vector_feature = self.vector_feature,
+                        n_class = self.n_class,
+                              )
+            train_ix = list(range(len(self.y)))
+            shuffle(train_ix)
+            for epoch in range(self.epoch):
+                t1 = time()
+                label_lst, out_lst = None, None
+                label_e, out_e = None, None
+                for ix, batch_ix in enumerate(range(0, self.len_train, self.batch_size)):
+                    batch_static, batch_dynamic, batch_dynamic_len, batch_y = self.get_batch(
+                            train_ix[ix*self.batch_size:min(len(self.y), (ix+1)*self.batch_size)])
+                    batch_static = np.array(batch_static)
+                    batch_dynamic = np.array(batch_dynamic.tolist())
+                    batch_dynamic_len = np.array(batch_dynamic_len)
+                    batch_y = np.array(batch_y.tolist())
+                    
+                    f_dict = {model.label:batch_y,
+                              model.static_index: batch_static, 
+                              model.dropout_keep_fm:[1.0, 1.0],
+                              model.dropout_keep_deep:[1.0, 1.0, 1.0],
+                              model.train_phase: True}
+                    if len(self.vector_feature) != 0:
+                        f_dict.update({model.dynamic_index:batch_dynamic,
+                                       model.dynamic_len:batch_dynamic_len})
+                    loss_, _ ,label_, out_= model.sess.run(
+                            (model.loss, model.optimizer, model.label, model.out),
+                            feed_dict=f_dict)
+                    # 
+                    out_ = res_normalization(out_)
+                    if label_e is None:
+                        label_e = label_
+                        out_e = out_
+                    else:
+                        label_e = np.concatenate((label_e, label_), axis=0)
+                        out_e = np.concatenate((out_e, out_), axis=0)
+                    if label_lst is None:
+                        label_lst = label_
+                        out_lst = out_
+                    else:
+                        label_lst = np.concatenate((label_lst, label_), axis=0)
+                        out_lst = np.concatenate((out_lst, out_), axis=0)
+                    if self.verbose and ix % 100 == 99:
+                        print('[%d/%d] logloss = %.4f [ %ds ]'
+                              %(ix+1, self.len_train//self.batch_size, 
+                                log_loss(label_e, out_e), 
+                                int(time()-t1)))
+                        label_e, out_e = None, None
+            
+            self.embedding = model.get_embeddings(self.dic_LabelEncoder)
     
     def preprocess(self):
         if self.verbose:
             print('preprocessing...')
+        if self.get_prob:
+            self.train_ix = list(range(len(self.df)))
+            self.test_ix = list(range(len(self.df), len(self.df)+len(self.df_test)))
+            df = self.df.append(self.df_test).reset_index(drop=True)
         dic_LabelEncoder = {}
         bins = 10
-        n_features = [np.int32(0), np.int32(0)]
+        n_features = [0, 0]
         '''ONEHOT_COL'''
         if len(self.onehot_feature) != 0:
             for col in self.onehot_feature:
                 enc = LabelEncoder()
-                self.df[col] = enc.fit_transform(self.df[col].astype(str).fillna('-1').values) + n_features[0]
+                df[col] = enc.fit_transform(df[col].astype(str).fillna('-1').values) + n_features[0]
                 temp_dic = {}
                 for ix, item in enumerate(enc.classes_):
                     temp_dic[item] = n_features[0] + ix
-                n_features[0] += np.int32(len(set(self.df[col])))
+                n_features[0] += np.int32(len(set(df[col])))
                 dic_LabelEncoder[col] = temp_dic
         '''NUMERIC_COL'''
         if len(self.numerical_feature) != 0:
             '''preprocessing'''
             for col in self.numerical_feature:
-                self.df[col] = self.df[col].astype(np.float32)
-                _mean = np.mean(self.df[col])
-                _percentile_99 = np.percentile(self.df[col], 0.99)
-                _percentile_01 = np.percentile(self.df[col], 0.01)
+                df[col] = df[col].astype(np.float32)
+                _mean = np.mean(df[col])
+                _percentile_99 = np.percentile(df[col], 0.99)
+                _percentile_01 = np.percentile(df[col], 0.01)
                 if _percentile_99 > 100 * _mean:
-                    self.df[col].loc[self.df[col] > _percentile_99] = _percentile_99
+                    df[col].loc[df[col] > _percentile_99] = _percentile_99
                 if _percentile_01 < 0.01 * _mean:
-                    self.df[col].loc[self.df[col] < _percentile_01] = _percentile_01
+                    df[col].loc[df[col] < _percentile_01] = _percentile_01
             '''to bins, normalization'''
             for col in self.numerical_feature:
-                self.df[col] = pd.cut(self.df[col].fillna(-1), bins, labels=False).astype(np.int32)+np.int32(n_features[0])
-                n_features[0] += np.int32(len(set(self.df[col])))
-                if type(self.df[col][0]) != np.int32:
-                    self.df[col] = self.df[col].astype(np.int32)
+                df[col] = pd.cut(df[col].fillna(-1), bins, labels=False).astype(np.int32)+np.int32(n_features[0])
+                n_features[0] += np.int32(len(set(df[col])))
+                if type(df[col][0]) != np.int32:
+                    df[col] = df[col].astype(np.int32)
         '''VECTOR_COL'''
         if len(self.vector_feature) != 0:
             for col in self.vector_feature:
-                self.df[col] = self.df[col].fillna('-1')
-                self.df[col] = self.df[col].apply(lambda x:x.replace(',', ' '))
-                lst = list(set(' '.join(self.df[col]).split(' ')))
+                df[col] = df[col].fillna('-1')
+                df[col] = df[col].apply(lambda x:x.replace(',', ' '))
+                lst = list(set(' '.join(df[col]).split(' ')))
                 temp_dic = {}
                 for i, j in enumerate(lst):
-                    temp_dic[j] = n_features[1] + i + 1
+                    temp_dic[j] = n_features[1] + i
                 n_features[1] += len(lst)
-                self.df[col] = self.df[col].apply(lambda x:' '.join([str(temp_dic[j]) for j in x.split(' ')]))
+                df[col] = df[col].apply(lambda x:' '.join([str(temp_dic[j]) for j in x.split(' ')]))
                 dic_LabelEncoder[col] = temp_dic
-        self.df[self.label_name] = self.df[self.label_name].astype(np.float32)
+        df[self.label_name] = df[self.label_name].astype(np.float32)
         
-        self.df = self.df.sample(frac=1).reset_index(drop=True)
+        # df = df.sample(frac=1).reset_index(drop=True)
         
         if len(self.vector_feature) != 0:
             for col in self.vector_feature:
-                self.df[col] = self.df[col].apply(lambda x:[int(i) for i in x.split(' ')])
+                df[col] = df[col].apply(lambda x:[int(i) for i in x.split(' ')])
         
         self.field_sizes = [len(self.onehot_feature)+len(self.numerical_feature), len(self.vector_feature)]
         self.total_feature_sizes = n_features
         ''''''
-        self.static = self.df[self.onehot_feature + self.numerical_feature].values.copy()
+        self.static = df[self.onehot_feature + self.numerical_feature].values.copy()
         
-        self.y = self.df[self.label_name].astype(int).apply(
+        self.y = df[self.label_name].astype(int).apply(
                 lambda x:[1 if i == x else 0 for i in range(self.n_class)]).values.copy()
         
-        self.dynamic_len = self.df[self.vector_feature].copy()
-        for df in [self.dynamic_len]:
-            for col in self.vector_feature:
-                df[col] = df[col].apply(lambda x :len(x))
+        self.dynamic_len = df[self.vector_feature].copy()
+        for col in self.vector_feature:
+            self.dynamic_len[col] = self.dynamic_len[col].apply(lambda x :len(x))
         self.dynamic_len = self.dynamic_len.values
         
         
-        self.dynamic = self.df[self.vector_feature].copy()
-        for df in [self.dynamic]:
-            for col in self.vector_feature:
-                df[col] = df[col].apply(lambda x:[x[i] if i < len(x) else 0 for i in range(self.dynamic_max_len)])
+        self.dynamic = df[self.vector_feature].copy()
+        for col in self.vector_feature:
+            self.dynamic[col] = self.dynamic[col].apply(lambda x:[x[i] if i < len(x) else 0 for i in range(self.dynamic_max_len)])
         self.dynamic = self.dynamic.values
         
         self.dic_LabelEncoder = dic_LabelEncoder
-        del self.df
+        del self.df, self.df_test
 
     
-    def get_batch(self, _i):
-        if _i + self.batch_size > self.len_train:
-            end = self.len_train
-        else:
-            end = _i + self.batch_size
-        return (self.static[_i:end], 
-                self.dynamic[_i:end], 
-                self.dynamic_len[_i:end], 
-                self.y[_i:end])
+    def get_batch(self, ix):
+        return (self.static[ix], 
+                self.dynamic[ix], 
+                self.dynamic_len[ix], 
+                self.y[ix])
         
     
         
@@ -226,7 +353,6 @@ def res_normalization(arr):
 class Model_FM(BaseEstimator, TransformerMixin):
     def __init__(self, field_sizes, total_feature_sizes,
                  onehot_feature=[], 
-                 numerical_feature=[], 
                  vector_feature=[],
                  n_class=2,
                  dynamic_max_len=10, extern_lr_size=0, extern_lr_feature_size=0,
@@ -294,7 +420,7 @@ class Model_FM(BaseEstimator, TransformerMixin):
                                                           self.static_index) # None * static_feature_size * [k * F]
             # dynamic
             if len(self.vector_feature) != 0:
-                self.dynamic_ffm_embs = tf.nn.embedding_lookup(self.weights["dynamic_ffm_embeddings"],
+                self.dynamic_fm_embs = tf.nn.embedding_lookup(self.weights["dynamic_ffm_embeddings"],
                                                               self.dynamic_index) # None * [dynamic_feature_size * max_len] * [k * F]
                 self.fm_mask = tf.sequence_mask(tf.reshape(self.dynamic_len,[-1]), maxlen=self.dynamic_max_len) # [None * dynamic_feature] * max_len
                 self.fm_mask = tf.expand_dims(self.fm_mask, axis=-1) # [None * dynamic_feature] * max_len * 1
@@ -426,8 +552,11 @@ class Model_FM(BaseEstimator, TransformerMixin):
                         self.weights["static_ffm_embeddings"], 
                         np.array(range(self.total_feature_sizes[0]))))
         for col in self.onehot_feature:
-            for key in dic[col]:
-                dic[col][key] = emb[dic[col][key]]
+            try:
+                for key in dic[col]:
+                    dic[col][key] = emb[dic[col][key]]
+            except:
+                pass
         if len(self.vector_feature) != 0:
             emb = self.sess.run(
                     tf.nn.embedding_lookup(
@@ -435,7 +564,10 @@ class Model_FM(BaseEstimator, TransformerMixin):
                             np.array(range(self.total_feature_sizes[1]))))
             for col in self.vector_feature:
                 for key in dic[col]:
-                    dic[col][key] = emb[dic[col][key]]
+                    try:
+                        dic[col][key] = emb[dic[col][key]]
+                    except:
+                        pass
         
         return dic
 
@@ -443,7 +575,6 @@ class Model_FM(BaseEstimator, TransformerMixin):
 class Model_FFM(BaseEstimator, TransformerMixin):
     def __init__(self, field_sizes, total_feature_sizes,
                  onehot_feature=[], 
-                 numerical_feature=[], 
                  vector_feature=[],
                  n_class=2,
                  dynamic_max_len=10, extern_lr_size=0, extern_lr_feature_size=0,
@@ -644,15 +775,17 @@ class Model_FFM(BaseEstimator, TransformerMixin):
         z = tf.cond(train_phase, lambda: bn_train, lambda: bn_inference)
         return z
     
-    
     def get_embeddings(self, dic):
         emb = self.sess.run(
                 tf.nn.embedding_lookup(
                         self.weights["static_ffm_embeddings"], 
                         np.array(range(self.total_feature_sizes[0]))))
         for col in self.onehot_feature:
-            for key in dic[col]:
-                dic[col][key] = emb[dic[col][key]]
+            try:
+                for key in dic[col]:
+                    dic[col][key] = emb[dic[col][key]]
+            except:
+                pass
         if len(self.vector_feature) != 0:
             emb = self.sess.run(
                     tf.nn.embedding_lookup(
@@ -710,25 +843,27 @@ def quick_merge(df1:pd.DataFrame, df2:pd.DataFrame, on:list, feat:list, fillna=-
         pass
     return df1
     
-if __name__ == '__main__':
-    
-    nrows = 200000
-    data = pd.read_csv('./input/user_basic_info.csv', header=None, nrows=None)
-    data.columns = ['uid', 'gender', 'city', 'prodName', 'ramCapacity', 
-                    'ramLeftRation', 'romCapacity', 'romLeftRation', 'color',
-                    'fontSize', 'ct', 'carrier', 'os']
-    label = pd.read_csv('./input/age_train.csv', header=None, nrows=nrows)
-    label.columns = ['uid', 'age']
-    label_name = 'age'
-    data = quick_merge(label, data, on=['uid'], 
-                       feat=['gender', 'city', 'prodName', 
-                             'color', 'ct', 'carrier', 'os'])
-    model = NFM(data.fillna('-1'), label_name='age', 
-                onehot_feature=['gender', 'city', 'prodName', 
-                                'color', 'ct', 'carrier', 'os'],
-                verbose=True,
-                use_model='ffm')
-    data['city_emb'] = data['city'].fillna('-1').apply(
-            lambda x:model.embedding['city'][x])
-    print(data['city_emb'].head())
+# =============================================================================
+# if __name__ == '__main__':
+#     
+#     nrows = 200000
+#     data = pd.read_csv('./input/user_basic_info.csv', header=None, nrows=None)
+#     data.columns = ['uid', 'gender', 'city', 'prodName', 'ramCapacity', 
+#                     'ramLeftRation', 'romCapacity', 'romLeftRation', 'color',
+#                     'fontSize', 'ct', 'carrier', 'os']
+#     label = pd.read_csv('./input/age_train.csv', header=None, nrows=nrows)
+#     label.columns = ['uid', 'age']
+#     label_name = 'age'
+#     data = quick_merge(label, data, on=['uid'], 
+#                        feat=['gender', 'city', 'prodName', 
+#                              'color', 'ct', 'carrier', 'os'])
+#     model = NFM(data.fillna('-1'), label_name='age', 
+#                 onehot_feature=['gender', 'city', 'prodName', 
+#                                 'color', 'ct', 'carrier', 'os'],
+#                 verbose=True,
+#                 use_model='ffm')
+#     data['city_emb'] = data['city'].fillna('-1').apply(
+#             lambda x:model.embedding['city'][x])
+#     print(data['city_emb'].head())
+# =============================================================================
     
