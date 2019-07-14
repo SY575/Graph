@@ -187,7 +187,7 @@ class NFM():
                     prediction[np.array(_lst)-len(self.train_ix)] += out_ / 5
             self.oof = oof
             self.prediction = prediction
-        else:
+        else:   
             if self.use_model == 'fm':
                 model = Model_FM(
                         field_sizes=self.field_sizes, 
@@ -317,7 +317,7 @@ class NFM():
         ''''''
         self.static = df[self.onehot_feature + self.numerical_feature].values.copy()
         
-        self.y = df[self.label_name].astype(int).apply(
+        self.y = df[self.label_name].fillna(-1).astype(int).apply(
                 lambda x:[1 if i == x else 0 for i in range(self.n_class)]).values.copy()
         
         self.dynamic_len = df[self.vector_feature].copy()
